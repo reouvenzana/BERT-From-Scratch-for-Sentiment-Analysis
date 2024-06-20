@@ -7,8 +7,10 @@ from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from accelerate import Accelerator, DataLoaderConfiguration
-from models.bert import BERT
 import csv
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+from models.bert import BERT #! custom implementation of BERT from scratch using PyTorch
 
 
 
@@ -18,7 +20,7 @@ val_df = pd.read_csv('./data/val_rotten_tomatoes_movie_reviews.csv')
 test_df = pd.read_csv('./data/test_rotten_tomatoes_movie_reviews.csv')
 
 # Use a smaller dataset for testing
-train_df = train_df.head(200000)
+# train_df = train_df.head(2000)
 
 # Preprocess data
 train_texts = train_df['reviewText'].tolist()
@@ -72,18 +74,22 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Model configuration based on size
+    if size == 'tiny':
+        embed_size = 128
+        num_layers = 2
+        heads = 6
     if size == 'small':
         embed_size = 256
         num_layers = 4
-        heads = 4
-    elif size == 'medium':
-        embed_size = 512
-        num_layers = 8
         heads = 8
-    elif size == 'big':
+    elif size == 'base':
         embed_size = 768
         num_layers = 12
-        heads = 12
+        heads = 8
+    elif size == 'large':
+        embed_size = 1024
+        num_layers = 24
+        heads = 16
 
     model = BERT(
         vocab_size=30522,
@@ -99,18 +105,20 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
     dataloader_config = DataLoaderConfiguration(dispatch_batches=None, split_batches=False)
     accelerator = Accelerator(dataloader_config=dataloader_config)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=32)
-    test_dataloader = DataLoader(test_dataset, batch_size=32)
+    train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=256)
+    test_dataloader = DataLoader(test_dataset, batch_size=256)
 
     model, train_dataloader, val_dataloader, test_dataloader = accelerator.prepare(model, train_dataloader, val_dataloader, test_dataloader)
 
-    optimizer = AdamW(model.parameters(), lr=5e-5)
+    #? same parameters as in the LLaMa 1 paper in the optimizer chapter
+    optimizer = AdamW(model.parameters(), lr=5e-5, betas=(0.9, 0.95), weight_decay=0.1)
     num_epochs = 5
     num_training_steps = num_epochs * len(train_dataloader)
-    lr_scheduler = get_scheduler(
-        name="linear", optimizer=optimizer, num_warmup_steps=500, num_training_steps=num_training_steps
-    )
+    
+    # Use CosineAnnealingLR scheduler with final learning rate 10% of max
+    lr_scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps, eta_min=5e-6)
+
 
     # Create folder for saving results
     result_dir = f'./results/bert-{size}'
@@ -118,15 +126,15 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
 
     # Save training metrics
     metrics_file = f'{result_dir}/training_metrics.csv'
-    with open(metrics_file, mode='w') as file:
+    with open(metrics_file, mode='w', newline='') as file:
         writer = csv.writer(file)
         writer.writerow(['epoch', 'val_loss', 'val_accuracy', 'val_f1', 'val_precision', 'val_recall'])
 
     # Save detailed loss metrics
     loss_file = f'{result_dir}/loss.csv'
-    with open(loss_file, mode='w') as file:
+    with open(loss_file, mode='w', newline='') as file:
         writer = csv.writer(file)
-        writer.writerow(['epoch', 'batch', 'train_loss', 'val_loss', 'test_loss'])
+        writer.writerow(['epoch', 'batch', 'train_loss', 'val_loss'])
 
     # Training loop
     for epoch in range(num_epochs):
@@ -142,6 +150,8 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
             train_loss += loss.item()
             accelerator.backward(loss)
 
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # Gradient clipping
+
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
@@ -149,9 +159,9 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
             progress_bar.set_postfix(loss=loss.item())
 
             # Save batch train loss
-            with open(loss_file, mode='a') as file:
+            with open(loss_file, mode='a', newline='') as file:
                 writer = csv.writer(file)
-                writer.writerow([epoch+1, batch_num, loss.item(), '', ''])
+                writer.writerow([epoch+1, batch_num, loss.item(), ''])
             batch_num += 1
 
         torch.save(model.state_dict(), f'{result_dir}/model_epoch_{epoch+1}.pth')
@@ -174,9 +184,9 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
                 val_labels_list.append(labels)
 
                 # Save batch validation loss
-                with open(loss_file, mode='a') as file:
+                with open(loss_file, mode='a', newline='') as file:
                     writer = csv.writer(file)
-                    writer.writerow([epoch+1, batch_num, '', loss.item(), ''])
+                    writer.writerow([epoch+1, batch_num, '', loss.item()])
                 batch_num += 1
 
         val_preds = torch.cat(val_preds).to('cpu')
@@ -186,9 +196,14 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
         train_loss /= len(train_dataloader)
 
         # Save epoch validation metrics
-        with open(metrics_file, mode='a') as file:
+        with open(metrics_file, mode='a', newline='') as file:
             writer = csv.writer(file)
             writer.writerow([epoch+1, val_loss, val_metrics['accuracy'], val_metrics['f1'], val_metrics['precision'], val_metrics['recall']])
+
+        # Save epoch train and validation loss
+        with open(loss_file, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([epoch+1, '', train_loss, val_loss])
 
         model.train()
 
@@ -210,12 +225,6 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
             test_preds.append(logits)
             test_labels_list.append(labels)
 
-            # Save batch test loss
-            with open(loss_file, mode='a') as file:
-                writer = csv.writer(file)
-                writer.writerow(['test', batch_num, '', '', loss.item()])
-            batch_num += 1
-
     test_preds = torch.cat(test_preds).to('cpu')
     test_labels_list = torch.cat(test_labels_list).to('cpu')
     test_metrics = compute_metrics(test_preds, test_labels_list)
@@ -223,13 +232,18 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
 
     # Save test metrics
     test_metrics_file = f'{result_dir}/test_metrics.csv'
-    with open(test_metrics_file, mode='w') as file:
+    with open(test_metrics_file, mode='w', newline='') as file:  # Ajout de newline=''
         writer = csv.writer(file)
         writer.writerow(['test_loss', 'test_accuracy', 'test_f1', 'test_precision', 'test_recall'])
         writer.writerow([test_loss, test_metrics['accuracy'], test_metrics['f1'], test_metrics['precision'], test_metrics['recall']])
 
+    # Save final test loss
+    with open(loss_file, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['final_test', '', '', '', test_loss])
+
 # Train models of different sizes
-for size in ['small', 'medium', 'big']:
+for size in ['large']: # 'tiny', 'small', 'base', 'large'
     train(size, train_encodings, train_labels, val_encodings, val_labels, test_encodings, test_labels)
 
 #* first training : {'accuracy': 0.9074257137872885, 'f1': 0.9314531754574812, 'precision': 0.9266255461320997, 'recall': 0.9363313711911357}
