@@ -10,13 +10,15 @@ from accelerate import Accelerator, DataLoaderConfiguration
 from models.bert import BERT
 import csv
 
+
+
 # Load datasets
 train_df = pd.read_csv('./data/train_rotten_tomatoes_movie_reviews.csv')
 val_df = pd.read_csv('./data/val_rotten_tomatoes_movie_reviews.csv')
 test_df = pd.read_csv('./data/test_rotten_tomatoes_movie_reviews.csv')
 
 # Use a smaller dataset for testing
-train_df = train_df.head(3000)
+train_df = train_df.head(200000)
 
 # Preprocess data
 train_texts = train_df['reviewText'].tolist()
@@ -118,13 +120,20 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
     metrics_file = f'{result_dir}/training_metrics.csv'
     with open(metrics_file, mode='w') as file:
         writer = csv.writer(file)
-        writer.writerow(['epoch', 'train_loss', 'val_loss', 'val_accuracy', 'val_f1', 'val_precision', 'val_recall'])
+        writer.writerow(['epoch', 'val_loss', 'val_accuracy', 'val_f1', 'val_precision', 'val_recall'])
+
+    # Save detailed loss metrics
+    loss_file = f'{result_dir}/loss.csv'
+    with open(loss_file, mode='w') as file:
+        writer = csv.writer(file)
+        writer.writerow(['epoch', 'batch', 'train_loss', 'val_loss', 'test_loss'])
 
     # Training loop
     for epoch in range(num_epochs):
         model.train()
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
         train_loss = 0
+        batch_num = 0
 
         for batch in progress_bar:
             batch = {k: v.to(accelerator.device) for k, v in batch.items()}
@@ -139,22 +148,36 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
 
             progress_bar.set_postfix(loss=loss.item())
 
+            # Save batch train loss
+            with open(loss_file, mode='a') as file:
+                writer = csv.writer(file)
+                writer.writerow([epoch+1, batch_num, loss.item(), '', ''])
+            batch_num += 1
+
         torch.save(model.state_dict(), f'{result_dir}/model_epoch_{epoch+1}.pth')
 
         model.eval()
         val_loss = 0
         val_preds = []
         val_labels_list = []
+        batch_num = 0
 
         with torch.no_grad():
             for batch in val_dataloader:
                 batch = {k: v.to(accelerator.device) for k, v in batch.items()}
                 outputs = model(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
-                val_loss += F.cross_entropy(outputs, batch['labels']).item()
+                loss = F.cross_entropy(outputs, batch['labels'])
+                val_loss += loss.item()
                 logits = outputs
                 labels = batch['labels']
                 val_preds.append(logits)
                 val_labels_list.append(labels)
+
+                # Save batch validation loss
+                with open(loss_file, mode='a') as file:
+                    writer = csv.writer(file)
+                    writer.writerow([epoch+1, batch_num, '', loss.item(), ''])
+                batch_num += 1
 
         val_preds = torch.cat(val_preds).to('cpu')
         val_labels_list = torch.cat(val_labels_list).to('cpu')
@@ -162,11 +185,48 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
         val_loss /= len(val_dataloader)
         train_loss /= len(train_dataloader)
 
+        # Save epoch validation metrics
         with open(metrics_file, mode='a') as file:
             writer = csv.writer(file)
-            writer.writerow([epoch+1, train_loss, val_loss, val_metrics['accuracy'], val_metrics['f1'], val_metrics['precision'], val_metrics['recall']])
+            writer.writerow([epoch+1, val_loss, val_metrics['accuracy'], val_metrics['f1'], val_metrics['precision'], val_metrics['recall']])
 
         model.train()
+
+    # Final evaluation on the test set after training
+    model.eval()
+    test_loss = 0
+    test_preds = []
+    test_labels_list = []
+    batch_num = 0
+
+    with torch.no_grad():
+        for batch in test_dataloader:
+            batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+            outputs = model(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
+            loss = F.cross_entropy(outputs, batch['labels'])
+            test_loss += loss.item()
+            logits = outputs
+            labels = batch['labels']
+            test_preds.append(logits)
+            test_labels_list.append(labels)
+
+            # Save batch test loss
+            with open(loss_file, mode='a') as file:
+                writer = csv.writer(file)
+                writer.writerow(['test', batch_num, '', '', loss.item()])
+            batch_num += 1
+
+    test_preds = torch.cat(test_preds).to('cpu')
+    test_labels_list = torch.cat(test_labels_list).to('cpu')
+    test_metrics = compute_metrics(test_preds, test_labels_list)
+    test_loss /= len(test_dataloader)
+
+    # Save test metrics
+    test_metrics_file = f'{result_dir}/test_metrics.csv'
+    with open(test_metrics_file, mode='w') as file:
+        writer = csv.writer(file)
+        writer.writerow(['test_loss', 'test_accuracy', 'test_f1', 'test_precision', 'test_recall'])
+        writer.writerow([test_loss, test_metrics['accuracy'], test_metrics['f1'], test_metrics['precision'], test_metrics['recall']])
 
 # Train models of different sizes
 for size in ['small', 'medium', 'big']:
