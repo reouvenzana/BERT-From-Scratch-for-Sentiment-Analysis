@@ -2,7 +2,6 @@ import torch
 from transformers import BertTokenizer, BertForSequenceClassification
 from accelerate import Accelerator
 
-# Charger le tokenizer et le modèle
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 model = BertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2)
 
