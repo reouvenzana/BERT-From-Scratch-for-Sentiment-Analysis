@@ -2,17 +2,15 @@ import os
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from transformers import BertTokenizer, BertForSequenceClassification, AdamW, get_scheduler
+from transformers import BertTokenizer, get_scheduler
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from accelerate import Accelerator, DataLoaderConfiguration
 import csv
 from torch.optim.lr_scheduler import CosineAnnealingLR
-
-from models.bert import BERT #! custom implementation of BERT from scratch using PyTorch
-
-
+from torch.optim import AdamW
+from models.bert import BERT  # Custom implementation of BERT from scratch using PyTorch
 
 # Load datasets
 train_df = pd.read_csv('./data/train_rotten_tomatoes_movie_reviews.csv')
@@ -20,7 +18,7 @@ val_df = pd.read_csv('./data/val_rotten_tomatoes_movie_reviews.csv')
 test_df = pd.read_csv('./data/test_rotten_tomatoes_movie_reviews.csv')
 
 # Use a smaller dataset for testing
-# train_df = train_df.head(2000)
+train_df = train_df.head(2000)
 
 # Preprocess data
 train_texts = train_df['reviewText'].tolist()
@@ -38,7 +36,7 @@ val_encodings = tokenizer(val_texts, truncation=True, padding=True, max_length=5
 test_encodings = tokenizer(test_texts, truncation=True, padding=True, max_length=512)
 
 # Define Dataset class
-class SentimentDataset(torch.utils.data.Dataset):
+class SentimentDataset(Dataset):
     def __init__(self, encodings, labels):
         self.encodings = encodings
         self.labels = labels
@@ -65,6 +63,25 @@ def compute_metrics(preds, labels):
         'recall': recall
     }
 
+def check_model_dtype(model, expected_dtype):
+    for name, param in model.named_parameters():
+        if param.dtype != expected_dtype:
+            print(f"Parameter {name} is not in {expected_dtype}, it is in {param.dtype}")
+        assert param.dtype == expected_dtype, f"Parameter {name} is not in {expected_dtype}, it is in {param.dtype}"
+    for name, buffer in model.named_buffers():
+        if buffer.dtype != expected_dtype:
+            print(f"Buffer {name} is not in {expected_dtype}, it is in {buffer.dtype}")
+        assert buffer.dtype == expected_dtype, f"Buffer {name} is not in {expected_dtype}, it is in {buffer.dtype}"
+    print("All model parameters and buffers are in the expected dtype.")
+
+def check_optimizer_dtype(optimizer, expected_dtype):
+    for group in optimizer.param_groups:
+        for param in group['params']:
+            if param.dtype != expected_dtype:
+                print(f"Optimizer parameter is not in {expected_dtype}, it is in {param.dtype}")
+            assert param.dtype == expected_dtype, f"Optimizer parameter is not in {expected_dtype}, it is in {param.dtype}"
+    print("All optimizer parameters are in the expected dtype.")
+
 def train(size, train_encodings, train_labels, val_encodings, val_labels, test_encodings, test_labels):
     # Prepare datasets and dataloaders
     train_dataset = SentimentDataset(train_encodings, train_labels)
@@ -77,8 +94,8 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
     if size == 'tiny':
         embed_size = 128
         num_layers = 2
-        heads = 6
-    if size == 'small':
+        heads = 4
+    elif size == 'small':
         embed_size = 256
         num_layers = 4
         heads = 8
@@ -102,16 +119,25 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
         max_length=512
     ).to(device)
 
+    # Apply TorchScript for model optimization
+    model = torch.jit.script(model)
+    
+    # Initialize Accelerator with mixed precision
     dataloader_config = DataLoaderConfiguration(dispatch_batches=None, split_batches=False)
-    accelerator = Accelerator(dataloader_config=dataloader_config)
+    accelerator = Accelerator(dataloader_config=dataloader_config, mixed_precision="bf16")
 
-    train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=256)
-    test_dataloader = DataLoader(test_dataset, batch_size=256)
+    train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=128)
+    test_dataloader = DataLoader(test_dataset, batch_size=128)
 
     model, train_dataloader, val_dataloader, test_dataloader = accelerator.prepare(model, train_dataloader, val_dataloader, test_dataloader)
 
-    #? same parameters as in the LLaMa 1 paper in the optimizer chapter
+    # Convert model to bfloat16
+    model.to(torch.bfloat16)
+
+    # Check if model parameters are in bf16
+    check_model_dtype(model, torch.bfloat16)
+
     optimizer = AdamW(model.parameters(), lr=5e-5, betas=(0.9, 0.95), weight_decay=0.1)
     num_epochs = 5
     num_training_steps = num_epochs * len(train_dataloader)
@@ -119,6 +145,8 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
     # Use CosineAnnealingLR scheduler with final learning rate 10% of max
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps, eta_min=5e-6)
 
+    # Check if optimizer parameters are in bf16
+    check_optimizer_dtype(optimizer, torch.bfloat16)
 
     # Create folder for saving results
     result_dir = f'./results/bert-{size}'
@@ -150,7 +178,7 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
             train_loss += loss.item()
             accelerator.backward(loss)
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
 
             optimizer.step()
             lr_scheduler.step()
@@ -232,7 +260,7 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
 
     # Save test metrics
     test_metrics_file = f'{result_dir}/test_metrics.csv'
-    with open(test_metrics_file, mode='w', newline='') as file:  # Ajout de newline=''
+    with open(test_metrics_file, mode='w', newline='') as file:
         writer = csv.writer(file)
         writer.writerow(['test_loss', 'test_accuracy', 'test_f1', 'test_precision', 'test_recall'])
         writer.writerow([test_loss, test_metrics['accuracy'], test_metrics['f1'], test_metrics['precision'], test_metrics['recall']])
@@ -243,7 +271,5 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
         writer.writerow(['final_test', '', '', '', test_loss])
 
 # Train models of different sizes
-for size in ['large']: # 'tiny', 'small', 'base', 'large'
+for size in ['tiny', 'small', 'base', 'large']:  # 'tiny', 'small', 'base', 'large'
     train(size, train_encodings, train_labels, val_encodings, val_labels, test_encodings, test_labels)
-
-#* first training : {'accuracy': 0.9074257137872885, 'f1': 0.9314531754574812, 'precision': 0.9266255461320997, 'recall': 0.9363313711911357}
