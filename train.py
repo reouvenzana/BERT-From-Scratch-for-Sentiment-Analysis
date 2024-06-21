@@ -10,6 +10,7 @@ from accelerate import Accelerator, DataLoaderConfiguration
 import csv
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim import AdamW
+import numpy as np
 from models.bert import BERT  # Custom implementation of BERT from scratch using PyTorch
 
 # Load split dataset (use scripts/split_dataset.py)
