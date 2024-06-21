@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim import AdamW
 from models.bert import BERT  # Custom implementation of BERT from scratch using PyTorch
 
-# Load datasets
+# Load split dataset (use scripts/split_dataset.py)
 train_df = pd.read_csv('./data/train_rotten_tomatoes_movie_reviews.csv')
 val_df = pd.read_csv('./data/val_rotten_tomatoes_movie_reviews.csv')
 test_df = pd.read_csv('./data/test_rotten_tomatoes_movie_reviews.csv')
