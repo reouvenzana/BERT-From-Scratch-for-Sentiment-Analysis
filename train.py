@@ -18,7 +18,7 @@ val_df = pd.read_csv('./data/val_rotten_tomatoes_movie_reviews.csv')
 test_df = pd.read_csv('./data/test_rotten_tomatoes_movie_reviews.csv')
 
 # Use a smaller dataset for testing
-train_df = train_df.head(2000)
+# train_df = train_df.head(2000)
 
 # Preprocess data
 train_texts = train_df['reviewText'].tolist()
@@ -82,7 +82,24 @@ def check_optimizer_dtype(optimizer, expected_dtype):
             assert param.dtype == expected_dtype, f"Optimizer parameter is not in {expected_dtype}, it is in {param.dtype}"
     print("All optimizer parameters are in the expected dtype.")
 
-def train(size, train_encodings, train_labels, val_encodings, val_labels, test_encodings, test_labels):
+class EarlyStopping:
+    def __init__(self, patience=5, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = np.inf
+
+    def __call__(self, val_loss):
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
+def train(size, train_encodings, train_labels, val_encodings, val_labels, test_encodings, test_labels, precision='bf16'):
     # Prepare datasets and dataloaders
     train_dataset = SentimentDataset(train_encodings, train_labels)
     val_dataset = SentimentDataset(val_encodings, val_labels)
@@ -124,32 +141,36 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
     
     # Initialize Accelerator with mixed precision
     dataloader_config = DataLoaderConfiguration(dispatch_batches=None, split_batches=False)
-    accelerator = Accelerator(dataloader_config=dataloader_config, mixed_precision="bf16")
-
-    train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=128)
-    test_dataloader = DataLoader(test_dataset, batch_size=128)
+    accelerator = Accelerator(dataloader_config=dataloader_config, mixed_precision='no')
+    
+    train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=64)
+    test_dataloader = DataLoader(test_dataset, batch_size=64)
 
     model, train_dataloader, val_dataloader, test_dataloader = accelerator.prepare(model, train_dataloader, val_dataloader, test_dataloader)
 
-    # Convert model to bfloat16
-    model.to(torch.bfloat16)
+    if precision == 'bf16':
+        model.to(torch.bfloat16)
+        expected_dtype = torch.bfloat16
+    elif precision == 'fp32':
+        model.to(torch.float32)
+        expected_dtype = torch.float32
+    else:
+        raise ValueError("Precision must be either 'bf16' or 'fp32'")
 
-    # Check if model parameters are in bf16
-    check_model_dtype(model, torch.bfloat16)
+    check_model_dtype(model, expected_dtype)
 
-    optimizer = AdamW(model.parameters(), lr=5e-5, betas=(0.9, 0.95), weight_decay=0.1)
-    num_epochs = 5
+    optimizer = AdamW(model.parameters(), lr=4e-5, betas=(0.9, 0.95), weight_decay=0.1)
+    num_epochs = 40
     num_training_steps = num_epochs * len(train_dataloader)
     
     # Use CosineAnnealingLR scheduler with final learning rate 10% of max
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=num_training_steps, eta_min=5e-6)
 
-    # Check if optimizer parameters are in bf16
-    check_optimizer_dtype(optimizer, torch.bfloat16)
+    check_optimizer_dtype(optimizer, expected_dtype)
 
     # Create folder for saving results
-    result_dir = f'./results/bert-{size}'
+    result_dir = f'./results/bert-{size}-{precision}'
     os.makedirs(result_dir, exist_ok=True)
 
     # Save training metrics
@@ -165,6 +186,7 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
         writer.writerow(['epoch', 'batch', 'train_loss', 'val_loss'])
 
     # Training loop
+    early_stopping = EarlyStopping(patience=3, min_delta=0.01)
     for epoch in range(num_epochs):
         model.train()
         progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
@@ -223,6 +245,10 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
         val_loss /= len(val_dataloader)
         train_loss /= len(train_dataloader)
 
+        if early_stopping(val_loss):
+            print(f"Early stopping triggered at epoch {epoch+1}")
+            break
+
         # Save epoch validation metrics
         with open(metrics_file, mode='a', newline='') as file:
             writer = csv.writer(file)
@@ -236,7 +262,7 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
         model.train()
 
     # Final evaluation on the test set after training
-    model.eval()
+    model.eval()    
     test_loss = 0
     test_preds = []
     test_labels_list = []
@@ -272,4 +298,5 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
 
 # Train models of different sizes
 for size in ['tiny', 'small', 'base', 'large']:  # 'tiny', 'small', 'base', 'large'
-    train(size, train_encodings, train_labels, val_encodings, val_labels, test_encodings, test_labels)
+    for precision in ['fp32', 'bf16']:
+        train(size, train_encodings, train_labels, val_encodings, val_labels, test_encodings, test_labels, precision=precision)
