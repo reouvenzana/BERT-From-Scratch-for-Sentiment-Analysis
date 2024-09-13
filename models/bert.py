@@ -57,7 +57,7 @@ class TransformerBlock(nn.Module):
 
         self.feed_forward = nn.Sequential(
             nn.Linear(embed_size, forward_expansion * embed_size),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(forward_expansion * embed_size, embed_size)
         )
 
@@ -65,57 +65,62 @@ class TransformerBlock(nn.Module):
 
     def forward(self, value, key, query, mask):
         attention = self.attention(value, key, query, mask)
-
-        x = self.dropout(self.norm1(attention + query))
+        x = self.norm1(attention + query)
+        x = self.dropout(x)
         forward = self.feed_forward(x)
-        out = self.dropout(self.norm2(forward + x))
+        out = self.norm2(forward + x)
+        out = self.dropout(out)
         return out
 
 class BERT(nn.Module):
-    """
-        Parameters:
-        vocab_size (int): Size of the vocabulary. (e.g., 30522 for standard BERT)
-        embed_size (int): Size of the embedding vectors.
-            - Tiny: 128
-            - Small: 256
-            - Medium: 512
-            - Large: 1024
-            - Huge: 2048
-        num_layers (int): Number of transformer layers.
-            - Tiny: 2
-            - Small: 4
-            - Medium: 8
-            - Large: 16
-            - Huge: 32
-        heads (int): Number of attention heads.
-            - Tiny: 2
-            - Small: 4
-            - Medium: 8
-            - Large: 16
-            - Huge: 32
-    """
     def __init__(self, vocab_size, embed_size, num_layers, heads, device, forward_expansion, dropout, max_length):
         super(BERT, self).__init__()
         self.embed_size = embed_size
         self.device = device
         self.word_embedding = nn.Embedding(vocab_size, embed_size)
         self.position_embedding = nn.Embedding(max_length, embed_size)
+        self.token_type_embedding = nn.Embedding(2, embed_size)
 
         self.layers = nn.ModuleList(
             [TransformerBlock(embed_size, heads, dropout, forward_expansion) for _ in range(num_layers)]
         )
         self.dropout = nn.Dropout(dropout)
+        self.pooler = nn.Linear(embed_size, embed_size)
         self.fc_out = nn.Linear(embed_size, 2)
 
-    def forward(self, input_ids, attention_mask=None):
+        self._init_weights()
+
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, (nn.Linear, nn.Embedding)):
+                module.weight.data.normal_(mean=0.0, std=0.02)
+            elif isinstance(module, nn.LayerNorm):
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.data.zero_()
+
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None):
         N, seq_length = input_ids.shape
         positions = torch.arange(0, seq_length).expand(N, seq_length).to(self.device)
-        out = self.dropout(self.word_embedding(input_ids) + self.position_embedding(positions))
+        
+        if token_type_ids is None:
+            token_type_ids = torch.zeros(N, seq_length, dtype=torch.long).to(self.device)
+
+        word_embeddings = self.word_embedding(input_ids)
+        position_embeddings = self.position_embedding(positions)
+        token_type_embeddings = self.token_type_embedding(token_type_ids)
+
+        embeddings = word_embeddings + position_embeddings + token_type_embeddings
+        out = self.dropout(embeddings)
 
         for layer in self.layers:
             out = layer(out, out, out, attention_mask)
 
-        out = self.fc_out(out[:, 0, :])  # We only care about the [CLS] token output
+        pooled_output = self.pooler(out[:, 0])
+        pooled_output = torch.tanh(pooled_output)
+        out = self.fc_out(pooled_output)
+        
         return out
 
 """
