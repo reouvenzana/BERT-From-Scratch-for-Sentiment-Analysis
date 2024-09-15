@@ -12,7 +12,8 @@ import numpy as np
 import csv
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim import AdamW
-from models.bert2 import BERT  # Custom implementation of BERT from scratch using PyTorch
+from models.bert import BERT  # Custom implementation of BERT from scratch using PyTorch
+
 
 # Load datasets
 train_df = pd.read_csv('./data/train_rotten_tomatoes_movie_reviews.csv')
@@ -20,7 +21,7 @@ val_df = pd.read_csv('./data/val_rotten_tomatoes_movie_reviews.csv')
 test_df = pd.read_csv('./data/test_rotten_tomatoes_movie_reviews.csv')
 
 # Use a smaller dataset for testing
-train_df = train_df.head(1000)
+# train_df = train_df.head(1000)
 
 # Preprocess data
 train_texts = train_df['reviewText'].tolist()
@@ -36,6 +37,41 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 train_encodings = tokenizer(train_texts, truncation=True, padding=True, max_length=512)
 val_encodings = tokenizer(val_texts, truncation=True, padding=True, max_length=512)
 test_encodings = tokenizer(test_texts, truncation=True, padding=True, max_length=512)
+
+
+def create_csv_files(base_dir, metrics, datasets):
+    for metric in metrics:
+        for dataset in datasets:
+            file_path = os.path.join(base_dir, f"{metric}_{dataset}.csv")
+            with open(file_path, mode='w', newline='') as file:
+                headers = ['epoch', 'value']
+                writer = csv.writer(file)
+                writer.writerow(headers)
+        
+        # Créer le fichier de test pour chaque métrique
+        test_file_path = os.path.join(base_dir, f"{metric}_test.csv")
+        with open(test_file_path, mode='w', newline='') as file:
+            headers = ['epoch', 'value']
+            writer = csv.writer(file)
+            writer.writerow(headers)
+
+def append_to_csv(file_path, row):
+    with open(file_path, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(row)
+
+def create_final_epoch_csv(base_dir):
+    file_path = os.path.join(base_dir, "final_epoch.csv")
+    with open(file_path, mode='w', newline='') as file:
+        headers = ['final_epoch']
+        writer = csv.writer(file)
+        writer.writerow(headers)
+
+
+def setup_output_directory(base_dir, model_type, size, precision=None):
+    dir_path = f"{base_dir}/{model_type}/bert-{size}-{precision}" if precision else f"{base_dir}/{model_type}/bert-{size}"
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path
 
 #? Define Dataset class
 class SentimentDataset(Dataset):
@@ -183,24 +219,21 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
             result_dir = f'{output_results}/from_scratch/bert-{size}-{precision}'
             os.makedirs(result_dir, exist_ok=True)
 
-            metrics_file = f'{result_dir}/training_metrics.csv'
-            with open(metrics_file, mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['epoch', 'val_loss', 'val_accuracy', 'val_f1', 'val_precision', 'val_recall'])
-
-            loss_file = f'{result_dir}/loss.csv'
-            with open(loss_file, mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['epoch', 'batch', 'train_loss', 'val_loss'])
+            # Définir les metrics et datasets pour les fichiers CSV
+            metrics = ['loss', 'accuracy', 'f1', 'precision', 'recall']
+            datasets = ['train', 'valset', 'test']
+            create_csv_files(result_dir, metrics, datasets)
 
             early_stopping = EarlyStopping(patience=1, min_delta=0.01)
             for epoch in range(num_epochs):
                 model.train()
-                progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+                progress_bar = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f"Epoch {epoch+1}/{num_epochs}")
                 train_loss = 0
                 batch_num = 0
 
-                for batch in progress_bar:
+                for batch_idx, batch in progress_bar:
+                    fractional_epoch = epoch + (batch_idx + 1) / len(train_dataloader)
+                    
                     batch = {k: v.to(accelerator.device) for k, v in batch.items()}
                     outputs = model(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
                     loss = F.cross_entropy(outputs, batch['labels'])
@@ -215,10 +248,9 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
 
                     progress_bar.set_postfix(loss=loss.item())
 
-                    with open(loss_file, mode='a', newline='') as file:
-                        writer = csv.writer(file)
-                        writer.writerow([epoch+1, batch_num, loss.item(), ''])
-                    batch_num += 1
+                    # Enregistrer la loss de training pour chaque batch
+                    loss_train_file = os.path.join(result_dir, "loss_train.csv")
+                    append_to_csv(loss_train_file, [fractional_epoch, loss.item()])
 
                 torch.save(model.state_dict(), f'{result_dir}/model_epoch_{epoch+1}.pth')
 
@@ -226,10 +258,11 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
                 val_loss = 0
                 val_preds = []
                 val_labels_list = []
-                batch_num = 0
 
                 with torch.no_grad():
-                    for batch in val_dataloader:
+                    for batch_idx, batch in enumerate(val_dataloader):
+                        fractional_epoch = epoch + 1  # La validation se fait à la fin de l'epoch
+                        
                         batch = {k: v.to(accelerator.device) for k, v in batch.items()}
                         outputs = model(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
                         loss = F.cross_entropy(outputs, batch['labels'])
@@ -239,9 +272,10 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
                         val_preds.append(logits)
                         val_labels_list.append(labels)
 
-                        with open(loss_file, mode='a', newline='') as file:
-                            writer = csv.writer(file)
-                            writer.writerow([epoch+1, batch_num, '', loss.item()])
+                        # Enregistrer la loss de validation pour chaque batch
+                        loss_val_file = os.path.join(result_dir, "loss_valset.csv")
+                        append_to_csv(loss_val_file, [fractional_epoch, loss.item()])
+
                         batch_num += 1
 
                 val_preds = torch.cat(val_preds).to('cpu')
@@ -255,13 +289,17 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
                     print(f"Early stopping triggered at epoch {epoch+1}")
                     break
 
-                with open(metrics_file, mode='a', newline='') as file:
-                    writer = csv.writer(file)
-                    writer.writerow([epoch+1, val_loss, val_metrics['accuracy'], val_metrics['f1'], val_metrics['precision'], val_metrics['recall']])
+                # Enregistrer les metrics de validation
+                for metric_name, metric_value in val_metrics.items():
+                    metric_file = os.path.join(result_dir, f"{metric_name}_valset.csv")
+                    append_to_csv(metric_file, [epoch + 1, metric_value])
 
-                with open(loss_file, mode='a', newline='') as file:
-                    writer = csv.writer(file)
-                    writer.writerow([epoch+1, '', train_loss, val_loss])
+                # Enregistrer la loss générale par epoch
+                loss_epoch_train_file = os.path.join(result_dir, "loss_train.csv")
+                append_to_csv(loss_epoch_train_file, [epoch + 1, train_loss / len(train_dataloader)])
+
+                loss_epoch_val_file = os.path.join(result_dir, "loss_valset.csv")
+                append_to_csv(loss_epoch_val_file, [epoch + 1, val_loss / len(val_dataloader)])
 
                 model.train()
 
@@ -287,16 +325,14 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
             test_metrics = compute_metrics(eval_pred)
             test_loss /= len(test_dataloader)
 
-            test_metrics_file = f'{result_dir}/test_metrics.csv'
-            with open(test_metrics_file, mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['test_loss', 'test_accuracy', 'test_f1', 'test_precision', 'test_recall'])
-                writer.writerow([test_loss, test_metrics['accuracy'], test_metrics['f1'], test_metrics['precision'], test_metrics['recall']])
+            # Enregistrer les metrics de test
+            metrics = ['loss', 'accuracy', 'f1', 'precision', 'recall']
+            for metric_name, metric_value in test_metrics.items():
+                metric_file = os.path.join(result_dir, f"{metric_name}_test.csv")
+                append_to_csv(metric_file, [num_epochs, metric_value]) 
 
-            with open(loss_file, mode='a', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['final_test', '', '', '', test_loss])
-
+            print(f"Training from scratch results for {size} BERT:", test_metrics)
+        
         else:
             print("Finetuning started!")
             if size == 'small':
@@ -314,16 +350,10 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
             finetuning_dir = f'{finetuning_base_dir}/finetuning-{size}'
             os.makedirs(finetuning_dir, exist_ok=True)
 
-            # Créer les fichiers CSV pour enregistrer les métriques et la loss
-            metrics_file = f'{finetuning_dir}/training_metrics.csv'
-            with open(metrics_file, mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['epoch', 'train_loss', 'val_loss', 'val_accuracy', 'val_f1', 'val_precision', 'val_recall'])
-
-            loss_file = f'{finetuning_dir}/loss.csv'
-            with open(loss_file, mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['epoch', 'batch', 'train_loss', 'val_loss'])
+            # Définir les metrics et datasets pour les fichiers CSV
+            metrics = ['loss', 'accuracy', 'f1', 'precision', 'recall']
+            datasets = ['train', 'valset']
+            create_csv_files(finetuning_dir, metrics, datasets)
 
             training_args = TrainingArguments(
                 output_dir=finetuning_dir,
@@ -347,64 +377,24 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
             class CustomTrainer(Trainer):
                 def __init__(self, *args, **kwargs):
                     super().__init__(*args, **kwargs)
-                    self.train_loss = 0
-                    self.train_batch_count = 0
-                    self.metrics_file = f'{self.args.output_dir}/training_metrics.csv'
-                    self.loss_file = f'{self.args.output_dir}/loss.csv'
-                    
-                    # Initialiser les fichiers CSV
-                    with open(self.metrics_file, mode='w', newline='') as file:
-                        writer = csv.writer(file)
-                        writer.writerow(['epoch', 'train_loss', 'val_loss', 'val_accuracy', 'val_f1', 'val_precision', 'val_recall'])
-                    
-                    with open(self.loss_file, mode='w', newline='') as file:
-                        writer = csv.writer(file)
-                        writer.writerow(['epoch', 'batch', 'train_loss', 'val_loss'])
+                    self.metrics = ['loss', 'accuracy', 'f1', 'precision', 'recall']
+                    self.datasets = ['train', 'valset']
+                    self.metrics_dir = finetuning_dir
 
                 def training_step(self, model, inputs):
                     loss = super().training_step(model, inputs)
-                    self.train_loss += loss.item()
-                    self.train_batch_count += 1
-                    
-                    # Enregistrer la loss pour chaque batch
-                    with open(self.loss_file, mode='a', newline='') as file:
-                        writer = csv.writer(file)
-                        writer.writerow([self.state.epoch, self.state.global_step, loss.item(), ''])
-                    
+                    # Enregistrer la loss de training
+                    loss_train_file = os.path.join(self.metrics_dir, "loss_train.csv")
+                    append_to_csv(loss_train_file, [self.state.epoch, loss.item()])
                     return loss
 
                 def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
-                    # Calcul de la perte moyenne d'entraînement
-                    avg_train_loss = self.train_loss / self.train_batch_count if self.train_batch_count > 0 else 0
-                    
-                    # Réinitialisation des compteurs pour la prochaine époque
-                    self.train_loss = 0
-                    self.train_batch_count = 0
-
-                    # Appel de la méthode d'évaluation parent
                     metrics = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
-
-                    # Ajout de la perte moyenne d'entraînement aux métriques
-                    metrics['train_loss'] = avg_train_loss
-
-                    # Enregistrer les métriques dans le fichier CSV
-                    with open(self.metrics_file, mode='a', newline='') as file:
-                        writer = csv.writer(file)
-                        writer.writerow([
-                            self.state.epoch,
-                            avg_train_loss,
-                            metrics['eval_loss'],
-                            metrics['eval_accuracy'],
-                            metrics['eval_f1'],
-                            metrics['eval_precision'],
-                            metrics['eval_recall']
-                        ])
-
-                    # Enregistrer la loss de validation
-                    with open(self.loss_file, mode='a', newline='') as file:
-                        writer = csv.writer(file)
-                        writer.writerow([self.state.epoch, '', '', metrics['eval_loss']])
-
+                    # Enregistrer les metrics d'évaluation
+                    for metric_name, metric_value in metrics.items():
+                        dataset = 'valset' if 'eval' in metric_name else 'test'
+                        metric_file = os.path.join(self.metrics_dir, f"{metric_name.split('_')[-1]}_{dataset}.csv")
+                        append_to_csv(metric_file, [self.state.epoch, metric_value])
                     return metrics
 
                 def save_model(self, output_dir=None, _internal_call=False):
@@ -438,19 +428,12 @@ def train(size, train_encodings, train_labels, val_encodings, val_labels, test_e
             # Évaluer sur l'ensemble de test
             test_metrics = trainer.evaluate(test_dataset)
 
-            test_metrics_file = f'{finetuning_dir}/test_metrics.csv'
-            with open(test_metrics_file, mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['test_loss', 'test_accuracy', 'test_f1', 'test_precision', 'test_recall'])
-                writer.writerow([
-                    test_metrics['eval_loss'],
-                    test_metrics['eval_accuracy'],
-                    test_metrics['eval_f1'],
-                    test_metrics['eval_precision'],
-                    test_metrics['eval_recall']
-                ])
+            # Enregistrer les metrics de test
+            for metric_name, metric_value in test_metrics.items():
+                metric_file = os.path.join(finetuning_dir, f"{metric_name}_test.csv")
+                append_to_csv(metric_file, [metric_name == 'loss', metric_value])
 
-            print(f"Finetuning results for {size} BERT:", test_metrics)
+            print(f"Fine-tuning results for {size} BERT:", test_metrics)
 
 
 # Préparer les datasets
@@ -471,7 +454,7 @@ for size in ['small', 'base', 'large']:
         test_encodings=test_encodings,
         test_labels=test_labels,
         precision='fp32', 
-        output_results='./Test7',
+        output_results='./reel_1',
         finetuning=True
     )
 
@@ -490,6 +473,8 @@ for size in ['tiny', 'small', 'base', 'large']:
             test_encodings=test_encodings,
             test_labels=test_labels,
             precision=precision,
-            output_results="Test7",
+            output_results="reel_1",
             finetuning=False
         )
+
+print("Training from scratch is finished")
