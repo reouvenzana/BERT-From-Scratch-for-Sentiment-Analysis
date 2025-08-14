@@ -26,3 +26,42 @@ L’objectif est de comprendre en profondeur le fonctionnement de BERT et de mon
   - 📊 `plot.py` → Visualisation des résultats
 
 
+📂 Structure du projet
+
+BERT-From-Scratch-for-Sentiment-Analysis/
+│
+├── data/                # Jeux de données
+├── models/              # Modèles sauvegardés
+├── scripts/             # Scripts utilitaires
+├── train.py             # Script d’entraînement
+├── inference.py         # Script de prédiction
+├── plot.py              # Visualisation des métriques
+└── README.md
+
+
+▶️ Exécution du projet
+
+1️⃣ Cloner le dépôt
+
+git clone https://github.com/JulWebana/BERT-From-Scratch-for-Sentiment-Analysis.git
+cd BERT-From-Scratch-for-Sentiment-Analysis
+
+
+2️⃣ Installer les dépendances
+
+pip install -r requirements.txt
+
+
+3️⃣ Entraîner le modèle
+
+python train.py
+
+
+4️⃣ Faire une prédiction
+
+python inference.py --text "I love this product!"
+
+
+📄 Licence
+
+Ce projet est sous licence MIT – utilisation libre et modification autorisée.
