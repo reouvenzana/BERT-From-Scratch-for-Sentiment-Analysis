@@ -21,8 +21,8 @@ L’objectif est de comprendre en profondeur le fonctionnement de BERT et de mon
 - **Traitement des données** : pandas, NumPy
 - **Visualisation** : Matplotlib, Seaborn
 - **Scripts :**
-  🎯 `train.py` → Entraînement du modèle  
-  🔍 `inference.py` → Prédictions sur nouveaux échantillons  
-  📊 `plot.py` → Visualisation des résultats
+  - 🎯 `train.py` → Entraînement du modèle  
+  - 🔍 `inference.py` → Prédictions sur nouveaux échantillons  
+  - 📊 `plot.py` → Visualisation des résultats
 
 
