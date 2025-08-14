@@ -31,11 +31,11 @@ L’objectif est de comprendre en profondeur le fonctionnement de BERT et de mon
 🛠️ **Technologies utilisées :**
 
 ```
-- **Langage** : Python
-- **NLP & Deep Learning** : PyTorch, Transformers (ou implémentation custom selon le repo)
-- **Traitement des données** : pandas, NumPy
-- **Visualisation** : Matplotlib, Seaborn
-- **Scripts :**
+- Langage : Python
+- NLP & Deep Learning : PyTorch, Transformers (ou implémentation custom selon le repo)
+- Traitement des données : pandas, NumPy
+- Visualisation : Matplotlib, Seaborn
+- Scripts :
   - 🎯 `train.py` → Entraînement du modèle  
   - 🔍 `inference.py` → Prédictions sur nouveaux échantillons  
   - 📊 `plot.py` → Visualisation des résultats
@@ -65,7 +65,7 @@ BERT-From-Scratch-for-Sentiment-Analysis/
 
 
 
-1️⃣ **Cloner le dépôt**  
+1️⃣ **Cloner le dépôt**
 
 ```bash
 git clone https://github.com/JulWebana/BERT-From-Scratch-for-Sentiment-Analysis.git
