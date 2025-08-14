@@ -51,9 +51,9 @@ BERT-From-Scratch-for-Sentiment-Analysis/
 ├── data/ # Jeux de données
 ├── models/ # Modèles sauvegardés
 ├── scripts/ # Scripts utilitaires
-│ ⚪ train.py → Script d’entraînement
-│ ⚪ inference.py → Script de prédiction
-│ ⚪ plot.py → Visualisation des métriques
+│ - train.py → Script d’entraînement
+│ - inference.py → Script de prédiction
+│ - plot.py → Visualisation des métriques
 └── README.md
 
 ```
