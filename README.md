@@ -1,20 +1,6 @@
 # BERT-From-Scratch-for-Sentiment-Analysis
 
 
-
-**Objectif :**
-
-```
-Ce projet implémente un modèle BERT entraîné from scratch pour l’analyse de sentiment.
-Il couvre tout le pipeline : prétraitement des données, entraînement, inférence, et visualisation des performances.
-L’objectif est de comprendre en profondeur le fonctionnement de BERT et de montrer comment le construire, l’entraîner et l’évaluer sans se limiter à l’utilisation de modèles pré-entraînés.
-
-```
-
----
-
-
-
 🚀 **Fonctionnalités :**
 
 ```
